@@ -1,0 +1,270 @@
+import matplotlib as mpl 
+import matplotlib.pyplot as plt
+from matplotlib.font_manager import FontProperties
+import pandas as pd
+import numpy as np
+import datetime
+import talib
+from WindPy import *
+w.start()
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
+data2 = w.wsi("000300.SH", "high,low,open,close,volume,pct_chg", "2018-07-01 09:00:00", "2021-07-28 16:00:42", "BarSize=60;PriceAdj=F")
+data2_df = pd.DataFrame(data2.Data, index = ['最高价','最低价','收盘价','开盘价','成交量','涨跌幅'], columns = data2.Times).T
+EquityIndex1_df = data2_df.copy()
+EquityIndex_df = EquityIndex1_df.loc["2019-07-01 09:00:00": "2021-07-28 15:00:00"]
+lenth1, lenth = len(data2_df), len(EquityIndex_df)
+
+def Rbreaker(data2_df, EquityIndex_df, NDAYS, a, b, c, d, K, T):
+    #突破买入价（Bbreak）观察卖出价（Ssetup）反转卖出价（Senter）反转买入价（Benter）观察买入价（Bsetup）突破卖出价（Sbreak）
+    #a=0.25 b=1.07 c=0.07 d=0.2
+    Bbreak_list, Ssetup_list, Senter_list, Benter_list, Bsetup_list, Sbreak_list, v_signal_list, HH_list, LL_list = [], [], [], [], [], [], [], [], []
+    for i in range(lenth1):
+        High = data2_df['最高价'][i]
+        Low = data2_df['最低价'][i]
+        Close = data2_df['收盘价'][i]
+        Pivot = (High + Low + Close) / 3
+        #print(type(High))
+        Ssetup = High + a * (Close - Low)
+        Bsetup = Low - a * (High - Close)
+        Senter = b / 2 * (High + Low) - c * Low
+        Benter = b / 2 * (High + Low) - c * High
+        Sbreak = Ssetup - d * (Ssetup - Bsetup)
+        Bbreak = Bsetup + d * (Ssetup - Bsetup)
+        '''
+        Bbreak = High + 2 * (Pivot - Low)
+        Ssetup = High + 1 * (Pivot - Low)
+        Senter = 2 * Pivot - Low
+        Benter = 2 * Pivot - High
+        Bsetup = Low - 1 * (High - Pivot)
+        Sbreak = Low - 2 * (High - Pivot)
+        '''
+        if i < NDAYS:
+            HH, LL = High, Low
+        else:
+            HH = max(data2_df['最高价'].iloc[i-NDAYS:i])
+            LL = min(data2_df['最低价'].iloc[i-NDAYS:i])
+        Ssetup_list.append(Ssetup)
+        Bsetup_list.append(Bsetup)
+        Senter_list.append(Senter)
+        Benter_list.append(Benter)
+        Sbreak_list.append(Sbreak)
+        Bbreak_list.append(Bbreak)
+        HH_list.append(HH)
+        LL_list.append(LL)
+        
+    EquityIndex_df['Ssetup'] = Ssetup_list[lenth1-lenth:]
+    EquityIndex_df['Bsetup'] = Bsetup_list[lenth1-lenth:]
+    EquityIndex_df['Senter'] = Senter_list[lenth1-lenth:]
+    EquityIndex_df['Benter'] = Benter_list[lenth1-lenth:]
+    EquityIndex_df['Sbreak'] = Sbreak_list[lenth1-lenth:]
+    EquityIndex_df['Bbreak'] = Bbreak_list[lenth1-lenth:]
+    EquityIndex_df['HH'] = HH_list[lenth1-lenth:]
+    EquityIndex_df['LL'] = LL_list[lenth1-lenth:]
+    
+    import math
+    vol_list = data2_df['成交量']
+    for k in range(lenth1):
+        if k < K:
+            v_signal_list.append(0)
+        else:
+            v_today = vol_list[k]
+            v_li = sorted(vol_list[k-K:k+1])
+            v_rank = v_li.index(v_today)
+            v_num = int(v_rank) / K
+            if v_num ==1:
+                v = 1
+            else:
+                v = math.floor(v_num * T) / (T - 1)
+            v_signal_list.append(v)
+    EquityIndex_df['成交量信号'] = v_signal_list[lenth1-lenth:]
+    #策略端
+    signal_list = [0]*lenth
+    for i in range(1,lenth):
+        if EquityIndex_df['收盘价'][i] > EquityIndex_df['Bbreak'][i]:
+            signal_list[i] = 1
+        elif EquityIndex_df['收盘价'][i] < EquityIndex_df['Sbreak'][i]:
+            signal_list[i] = -1
+        elif EquityIndex_df['收盘价'][i] < EquityIndex_df['Senter'][i] and EquityIndex_df['HH'][i] > EquityIndex_df['Ssetup'][i]:
+            signal_list[i] = -1
+        elif EquityIndex_df['收盘价'][i] > EquityIndex_df['Benter'][i] and EquityIndex_df['LL'][i] < EquityIndex_df['Bsetup'][i]:
+            signal_list[i] = 1            
+        else:
+            signal_list[i] = signal_list[i-1]
+        
+    EquityIndex_df['signal'] = signal_list
+    #多空策略
+    pos_list = EquityIndex_df['signal'].shift(1)
+    pos_list_revised = list(np.array(pos_list) * np.array(EquityIndex_df['成交量信号']))
+    EquityIndex_df['position'] = pos_list
+    EquityIndex_df['position_revised'] = pos_list_revised
+    EquityIndex_df = pd.DataFrame(EquityIndex_df, index=EquityIndex_df.index)
+    position_ser = EquityIndex_df['position'].copy()
+    position_ser.iloc[0] = 0    
+    position_ser.iloc[-1] = 0
+    position_ser = position_ser.fillna(0)
+    position_ser_revised = EquityIndex_df['position_revised'].copy()
+    position_ser_revised.iloc[0] = 0    
+    position_ser_revised.iloc[-1] = 0
+    position_ser_revised = position_ser_revised.fillna(0)
+
+    return position_ser, position_ser_revised
+    
+performance_df= pd.DataFrame(index = ['交易天数','区间收益','指数收益','区间年化','指数年化',
+                                   '持仓平均','日度胜率','最大回撤','回撤起始','回撤结束','交易次数','每年平均','夏普比率'])
+
+def performance_summary(EquityIndex_df, position_ser_list, position_ser_revised_list, para_list, commission_list, 
+                        trade_status = False, _print1 = False, _plot=True, _print=True):
+    for i in range(len(commission_list)):
+        position_ser = position_ser_list[i]
+        position_ser_revised = position_ser_revised_list[i]
+        para = para_list[i]
+        commission = commission_list[i]
+        EquityIndex_df['收益率'] = (((position_ser.shift(1)==position_ser)*EquityIndex_df['收盘价']/EquityIndex_df['收盘价'].shift(1)
+                                 + (position_ser.shift(1)!=position_ser)*EquityIndex_df['收盘价']/EquityIndex_df['开盘价'])
+                                 - len(EquityIndex_df['开盘价'])*[1])*position_ser_revised+len(EquityIndex_df['开盘价'])*[1]
+        EquityIndex_df['手续费'] = list((position_ser.shift(1)!=position_ser)*abs(position_ser.shift(1)-position_ser)*commission)
+        EquityIndex_df['除手续费收益率'] = EquityIndex_df['收益率'] - EquityIndex_df['手续费']
+
+        # 取出pnl序列
+        pnl_ser = EquityIndex_df['除手续费收益率']
+
+        # 夏普比率
+        up = (pnl_ser - [1] * len(pnl_ser)).mean()
+        down = (pnl_ser - [1] * len(pnl_ser)).std()
+        sharpe = up *2*15.81/ down
+        
+        # 天数
+        import math
+        trade_days = math.floor(len(pnl_ser) / 4)
+
+        # 收益
+        EquityIndex_df['标准收盘价'] = list(np.array(EquityIndex_df['收盘价'])/EquityIndex_df['收盘价'][0])
+        value_ser = pnl_ser.cumprod()
+        total_yield = (value_ser[-1] - 1)
+        compare_total_yield = (EquityIndex_df['标准收盘价'][-1] / EquityIndex_df['标准收盘价'][0] - 1)
+        total_yield_per_year = np.sign(total_yield + 1) * (abs(total_yield + 1)) ** (250 / trade_days) - 1
+        compare_total_yield_per_year = np.sign(compare_total_yield + 1) * (abs(compare_total_yield + 1)) ** (250 / trade_days) - 1
+        
+        #持仓单日收益
+        num = np.count_nonzero(np.array(position_ser)!=0)
+        avg_yield = 4 * total_yield / num
+
+        # 最大回撤
+        drawdown_ser = pd.Series(index=range(1, len(value_ser)+1), dtype='float64')
+        for i in range(1, len(value_ser)):
+            drawdown_ser[i] = value_ser[i] / value_ser[:i].max()
+        max_drawdown = (1-drawdown_ser.min())
+
+        # 最大回撤天数, 起止日期
+        drawdown_index = np.argmin(drawdown_ser) + 1
+        drawdown_date = value_ser.index[drawdown_index]
+        max_index = np.argmax(value_ser[:drawdown_date])
+        max_date = value_ser.index[max_index]
+
+        # 交易次数
+        trade_num = np.count_nonzero(np.array((position_ser - position_ser.shift(1))))
+        num_per_year = trade_num *250 / trade_days
+
+        # 胜率
+        win_count = (pnl_ser > 1).sum()
+        lose_count = (pnl_ser < 1).sum()
+        win_rate = win_count / (win_count + lose_count)
+
+        # 净值曲线
+        if _plot:
+            plt.figure(figsize=(22,4.3))
+            plt.grid(linestyle='-.')
+            plt.plot(value_ser, label = 'Strategy Return '+str(para))
+            plt.scatter(max_date, value_ser[max_date], c='r')
+            plt.scatter(drawdown_date, value_ser[drawdown_date], c='r')
+            plt.fill_between(value_ser[max_date:drawdown_date].index,
+                             value_ser.min(),
+                             value_ser[max_date],
+                             facecolor='green',
+                             alpha=0.3)
+            plt.plot(EquityIndex_df['标准收盘价'], color='black', label = 'Index Return')
+            plt.legend(loc = 0, ncol = 2)
+
+
+        performance_df[para]= [trade_days, total_yield, compare_total_yield, total_yield_per_year, compare_total_yield_per_year,
+                              avg_yield, win_rate, max_drawdown, max_date.strftime('%Y-%m-%d'), drawdown_date.strftime('%Y-%m-%d'),
+                              trade_num, num_per_year, sharpe]
+        
+        if _print1:
+            print("-" * 30)
+            print('交易天数：\t{}'.format(trade_days))
+            print('区间收益：\t{:.2%}'.format(total_yield))
+            print('指数收益：\t{:.2%}'.format(compare_total_yield))
+            print('区间年化：\t{:.2%}'.format(total_yield_per_year))
+            print('指数年化：\t{:.2%}'.format(compare_total_yield_per_year))
+            print('日度胜率：\t{:.2%}'.format(win_rate))
+            print("-" * 30)
+
+            print("最大回撤：\t{:.2%}".format(max_drawdown))
+            print("回撤起始：\t{}".format(max_date.strftime('%Y-%m-%d')))
+            print("回撤结束：\t{}".format(drawdown_date.strftime('%Y-%m-%d')))
+            print("-" * 30)
+
+            print("交易次数：\t{}".format(trade_num))
+            print("每年平均：\t{:.2f}".format(num_per_year))
+            print("-" * 30)
+
+            print('夏普比率：\t{:.2f}'.format(sharpe))
+            print('持仓平均：\t{:.2%}'.format(avg_yield))
+            print("-" * 30)
+
+        if trade_status:
+            bid_arr = EquityIndex_df['开盘价'].to_numpy()
+            ask_arr = EquityIndex_df['开盘价'].to_numpy()
+
+            temp = pd.DataFrame({'value':position_arr},index=EquityIndex_df.index)
+            temp['value_shift'] = temp['value'].shift(1).fillna(0)
+
+            change_pos = temp['value']-temp['value_shift']
+            change_pos[0] = 0
+
+            change_base = np.zeros(shape=len(EquityIndex_df))
+            change_buy = change_pos > 0
+            change_sell = change_pos < 0
+
+            time_index = pd.Series(EquityIndex_df.index,index = EquityIndex_df.index)
+
+            buy_time = EquityIndex_df.loc[change_buy].index.tolist()
+            buy_index = [time_index[x] for x in buy_time]
+            buy_price = EquityIndex_df.loc[change_buy]['开盘价'].tolist()
+
+            sell_time = EquityIndex_df.loc[change_sell].index.tolist()
+            sell_index = [time_index[x] for x in sell_time]
+            sell_price = EquityIndex_df.loc[change_sell]['开盘价'].tolist()
+
+            change_base[change_buy] = ask_arr[change_buy]
+            change_base[change_sell] = bid_arr[change_sell]
+
+            plt.figure(figsize=(22, 5))
+            plt.plot(EquityIndex_df['收盘价'], color='black')
+            plt.scatter(buy_index,
+                buy_price,
+                marker='^',
+                color='red',
+                zorder=100,
+                s=70)
+            plt.scatter(sell_index,
+                sell_price,
+                marker='v',
+                color='green',
+                zorder=100,
+                s=70)
+            
+    performance_df.iloc[1:8,:] = performance_df.iloc[1:8,:].applymap(lambda x: '%.2f%%' % (x*100))
+    if _print:        
+        return performance_df.T
+        
+position_ser_list = [Rbreaker(data2_df, EquityIndex_df, NDAYS=6, a=0.35, b=1.07, c=0.07, d=0.25, K=400, T=4)[0]]
+position_ser_revised_list = [Rbreaker(data2_df, EquityIndex_df, NDAYS=6, a=0.25, b=1.07, c=0.07, d=0.25, K=400, T=4)[1]]
+commission_list = [0.001]
+para_list = ['N=4 a=0.35 b=1.07 c=0.07 d=0.25']
+
+performance_summary(EquityIndex_df, position_ser_list, position_ser_revised_list, para_list, commission_list)
